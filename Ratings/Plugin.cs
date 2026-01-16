@@ -25,7 +25,7 @@ namespace Ratings
         private UI _ui;
 
         private const int EditorSceneBuildIndex = 3;
-        private const int PollIntervalMilliseconds = 1000; // poll interval
+        private const int PollIntervalMilliseconds = 1000;
 
         private static readonly Parse Parser = new();
         private static readonly Analyze Analyzer = new();
@@ -51,10 +51,10 @@ namespace Ratings
         public double Star = 0f;
 
         public Config Config = new();
-        public TextMeshProUGUI Label;
 
         private bool _initialized = false;
         private Scene _currentScene;
+        private TriangleVisualizer m_triangleVisualizer;
 
         [Init]
         private void Init()
@@ -135,12 +135,13 @@ namespace Ratings
 
                 _audioTimeSyncController.TimeChanged += OnTimeChanged;
 
-                if (Label == null)
-                {
-                    ApplyUI();
-                }
-
                 _ui.AddMenu(_mapEditorUI);
+                
+                if (_mapEditorUI != null)
+                {
+                    m_triangleVisualizer = _ui.AddTriangleVisualizer(_mapEditorUI);
+                    m_triangleVisualizer.SetupLabels();
+                }
             }
         }
 
@@ -192,50 +193,175 @@ namespace Ratings
                 _mapEditorUI = _mapEditorUI ?? Object.FindObjectOfType<MapEditorUI>();
             }
         }
+        
+        public struct InterpolatedRatings
+        {
+            public double Pass;
+            public double Tech;
+            public double Acc;
+            public double AccRating;
+            public double Stars;
+        }
+        
+        private static double Lerp(double a, double b, double t)
+        {
+            return a + (b - a) * t;
+        }
+        
+        private static double Interpolate(
+            double x0, double y0,
+            double x1, double y1,
+            double x)
+        {
+            if (Math.Abs(x1 - x0) < 1e-6)
+                return y0;
+
+            double t = (x - x0) / (x1 - x0);
+            return Lerp(y0, y1, t);
+        }
+        
+        private static (T before, T after) FindNeighbors<T>(
+            IReadOnlyList<T> list,
+            Func<T, double> timeSelector,
+            double time)
+        {
+            if (list == null || list.Count == 0)
+                return (default, default);
+            
+            double firstTime = timeSelector(list[0]);
+            if (time <= firstTime)
+                return (list[0], list[0]);
+            
+            double lastTime = timeSelector(list[list.Count - 1]);
+            if (time >= lastTime)
+                return (list[list.Count - 1], list[list.Count - 1]);
+            
+            for (int i = 1; i < list.Count; i++)
+            {
+                double t = timeSelector(list[i]);
+
+                if (t >= time)
+                    return (list[i - 1], list[i]);
+            }
+            
+            return (list[list.Count - 1], list[list.Count - 1]);
+        }
+        
+        private InterpolatedRatings GetRatingsAtTime(
+            double bpmTime,
+            double secondsTime,
+            beatleader_analyzer.BeatmapScanner.Data.Ratings analyzerData,
+            IReadOnlyList<NoteAcc> accData)
+        {
+            if (analyzerData?.PerSwing == null || accData == null)
+                return default;
+
+            var swings = analyzerData.PerSwing;
+            if (swings.Count < 2 || accData.Count < 2)
+                return default;
+            
+            var (s0, s1) = FindNeighbors(swings, x => x.Time, bpmTime);
+            var (a0, a1) = FindNeighbors(accData, x => x.time, secondsTime);
+
+            if (s0 == null || s1 == null || a0 == null || a1 == null)
+                return default;
+            
+            double pass = Interpolate(s0.Time, s0.Pass, s1.Time, s1.Pass, bpmTime);
+            double tech = Interpolate(s0.Time, s0.Tech, s1.Time, s1.Tech, bpmTime);
+            double acc  = Interpolate(a0.time, a0.acc,  a1.time, a1.acc,  secondsTime);
+            
+            double accRating = AccRating.GetRating(acc, pass, tech);
+            var curve = Curve.GetCurve(acc, accRating);
+            double stars = Curve.ToStars(
+                Config.StarAccuracy,
+                accRating,
+                pass,
+                tech,
+                curve
+            );
+
+            return new InterpolatedRatings
+            {
+                Pass = pass,
+                Tech = tech,
+                Acc = acc,
+                AccRating = accRating,
+                Stars = stars
+            };
+        }
+        
+        private static double Gaussian(double x, double sigma)
+        {
+            return Math.Exp(-(x * x) / (2.0 * sigma * sigma));
+        }
+
 
         private void OnTimeChanged()
         {
             if (!Config.Enabled || !_initialized)
+                return;
+
+            double centerBpmTime = _audioTimeSyncController.CurrentSongBpmTime;
+            double centerSeconds = _audioTimeSyncController.CurrentSeconds;
+
+            var analyzerData = AnalyzerData.FirstOrDefault();
+            if (analyzerData == null)
+                return;
+
+            const double windowRadius = 8.0;
+            const double sampleStep = 0.1;
+            const double sigma = 2.5;
+
+            double weightedPass = 0.0;
+            double weightedTech = 0.0;
+            double weightedAcc = 0.0;
+            double weightSum = 0.0;
+
+            for (double offset = -windowRadius; offset <= windowRadius; offset += sampleStep)
             {
+                double sampleSeconds = centerSeconds + offset;
+                double sampleBpmTime = centerBpmTime + offset;
+
+                var ratings = GetRatingsAtTime(
+                    sampleBpmTime,
+                    sampleSeconds,
+                    analyzerData,
+                    AccAiData
+                );
+
+                if (ratings.Pass == 0 && ratings.Tech == 0 && ratings.Acc == 0)
+                    continue;
+
+                double w = Gaussian(offset, sigma);
+
+                weightedPass += ratings.Pass * w;
+                weightedTech += ratings.Tech * w;
+                weightedAcc += ratings.Acc * w;
+                weightSum += w;
+            }
+
+            if (weightSum <= 1e-6)
+            {
+                m_triangleVisualizer.UpdateRatings(0, 0, 0, 0);
                 return;
             }
 
-            float time = _audioTimeSyncController.CurrentSongBpmTime;
-            float seconds = _audioTimeSyncController.CurrentSeconds;
+            double avgPass = weightedPass / weightSum;
+            double avgTech = weightedTech / weightSum;
+            double avgAcc = weightedAcc / weightSum;
 
-            beatleader_analyzer.BeatmapScanner.Data.Ratings data = AnalyzerData.FirstOrDefault();
-            List<PerSwing> timeData = data.PerSwing.Where(x => x.Time >= time).Take(Config.NotesCount).ToList();
-            List<NoteAcc> accData = AccAiData.Where(x => x.time >= seconds).Take(Config.NotesCount).ToList();
-            if (timeData.Count <= 1 || accData.Count <= 1)
-            {
-                Label.text = "Not enough data available.";
-                return;
-            }
+            double accRating = AccRating.GetRating(avgAcc, avgPass, avgTech);
+            var curve = Curve.GetCurve(avgAcc, accRating);
+            double stars = Curve.ToStars(
+                Config.StarAccuracy,
+                accRating,
+                avgPass,
+                avgTech,
+                curve
+            );
 
-            double avgPassRating = timeData.Average(x => x.Pass);
-            double avgTechRating = timeData.Average(x => x.Tech);
-            double avgAcc = accData.Average(x => x.acc);
-
-            double accRating = AccRating.GetRating(avgAcc, avgPassRating, avgTechRating);
-            List<Point> pointList = Curve.GetCurve(avgAcc, accRating);
-            double star = Curve.ToStars(Config.StarAccuracy, accRating, avgPassRating, avgTechRating, pointList);
-            
-            Label.text = "Data from next " + timeData.Count.ToString("F2") + " notes ->" +
-                " Pass: " + Math.Round(avgPassRating, 3).ToString("F3") +
-                " Tech: " + Math.Round(avgTechRating, 3).ToString("F3") +
-                " Acc: " + Math.Round(accRating, 3).ToString("F3") + 
-                " Star: " + Math.Round(star, 3).ToString("F3");
-        }
-
-        private void ApplyUI()
-        {
-            TextMeshProUGUI songTimeText = _songTimeLineController.transform.Find("Song Time").GetComponent<TextMeshProUGUI>();
-
-            Label = Object.Instantiate(songTimeText, songTimeText.transform.parent);
-            Label.rectTransform.localPosition = new Vector2(-210f, 36f);
-            Label.alignment = TextAlignmentOptions.BottomLeft;
-            Label.fontSize = 17;
-            Label.text = "";
+            m_triangleVisualizer.UpdateRatings((float)avgTech, (float)avgPass, (float)accRating, (float)stars);
         }
     }
 }
+

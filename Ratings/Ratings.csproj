@@ -102,6 +102,6 @@
 	</ItemGroup>
 
 	<Target Name="PostBuild" AfterTargets="PostBuildEvent">
-		<Exec Command=" xcopy /Y /F &quot;$(ProjectDir)bin\x64\$(Configuration)\netstandard2.1\$(TargetName).dll&quot; &quot;$(ChroMapperDir)\Plugins\&quot;" />
+		<Exec Command=" xcopy /Y /F &quot;$(ProjectDir)bin\$(Configuration)\netstandard2.1\$(TargetName).dll&quot; &quot;$(ChroMapperDir)\Plugins\&quot;" />
 	</Target>
 </Project>

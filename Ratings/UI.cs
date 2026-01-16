@@ -34,7 +34,7 @@ namespace Ratings
 
         public void AddMenu(MapEditorUI mapEditorUI)
         {
-            CanvasGroup parent = mapEditorUI.MainUIGroup[5];
+            CanvasGroup parent = mapEditorUI.MainUIGroup[5]; // right panel
             _ratingsMenu = new GameObject("Ratings Menu");
             _ratingsMenu.transform.parent = parent.transform;
 
@@ -46,16 +46,7 @@ namespace Ratings
             image.color = new Color(0.24f, 0.24f, 0.24f);
 
             var songTimeText = _ratings._songTimeLineController.transform.Find("Song Time").GetComponent<TextMeshProUGUI>();
-            _ratingsBG = new GameObject("Ratings BG");
-            _ratingsBG.transform.parent = songTimeText.transform;
-
-            AttachTransform(_ratingsBG, 425, 20, 0, 0, 0, 0, 1, 1);
-            _ratingsBG.transform.localPosition += new Vector3(-115, 25, 0);
-
-            image = _ratingsBG.AddComponent<Image>();
-            image.sprite = PersistentUI.Instance.Sprites.Background;
-            image.type = Image.Type.Sliced;
-            image.color = new Color(0.2f, 0.2f, 0.2f);
+            
 
             // Column 1
             AddLabel(_ratingsMenu.transform, "Ratings", "Save then press", new Vector2(-90, -25));
@@ -76,7 +67,6 @@ namespace Ratings
             {
                 _ratings.Config.Enabled = check;
                 _ratingsBG.SetActive(check);
-                _ratings.Label.gameObject.SetActive(check);
                 _ratings.SaveConfigFile();
             });
             AddTextInput(_ratingsMenu.transform, "StarRating", "Star", new Vector2(-20, -85), System.Math.Round(_ratings.Star, 3).ToString(), (value) =>
@@ -268,6 +258,25 @@ namespace Ratings
 
                 _values[i].ForceLabelUpdate();
             }
+        }
+        
+        public TriangleVisualizer AddTriangleVisualizer(MapEditorUI mapEditorUI)
+        {
+            CanvasGroup parent = mapEditorUI.MainUIGroup[5];
+    
+            var triangle = new GameObject("TriangleVisualizer");
+            triangle.transform.SetParent(parent.transform, false);
+            var rectTransform = AttachTransform(triangle, 80, 63, 1, 1, -65, -95);
+            
+            if (triangle.GetComponent<CanvasRenderer>() == null)
+            {
+                triangle.AddComponent<CanvasRenderer>();
+            }
+    
+            var t = triangle.AddComponent<TriangleVisualizer>();
+            
+            t.SetAllDirty();
+            return t;
         }
     }
 }
