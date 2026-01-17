@@ -11,11 +11,13 @@ using System.IO;
 using System.Linq;
 using System.Reflection;
 using System.Threading.Tasks;
+using Beatmap.Base;
 using TMPro;
 using UnityEngine;
 using UnityEngine.SceneManagement;
 using static Ratings.AccAi.PerNote;
 using Object = UnityEngine.Object;
+using HarmonyLib;
 
 namespace Ratings
 {
@@ -26,6 +28,7 @@ namespace Ratings
 
         private const int EditorSceneBuildIndex = 3;
         private const int PollIntervalMilliseconds = 1000;
+        private const int QueueReloadDebounceIntervalMilliseconds = 250;
 
         private static readonly Parse Parser = new();
         private static readonly Analyze Analyzer = new();
@@ -56,9 +59,63 @@ namespace Ratings
         private Scene _currentScene;
         private TriangleVisualizer m_triangleVisualizer;
 
+        private static Plugin m_instance;
+        private static bool _reloadQueued;
+        private static DateTime _lastSaveUtc;
+        public static async void QueueReload()
+        {
+            if (m_instance == null)
+                return;
+            
+            if (m_instance._currentScene.buildIndex != EditorSceneBuildIndex)
+                return;
+
+            _lastSaveUtc = DateTime.UtcNow;
+
+            if (_reloadQueued)
+                return;
+
+            _reloadQueued = true;
+
+            await Task.Delay(QueueReloadDebounceIntervalMilliseconds);
+            
+            if ((DateTime.UtcNow - _lastSaveUtc).TotalMilliseconds < QueueReloadDebounceIntervalMilliseconds)
+            {
+                _reloadQueued = false;
+                return;
+            }
+            
+            if (!m_instance._initialized ||
+                m_instance._noteGridContainer == null ||
+                m_instance._beatSaberSongContainer == null)
+            {
+                _reloadQueued = false;
+                return;
+            }
+
+            try
+            {
+                m_instance.Reload();
+            }
+            catch (Exception ex)
+            {
+                // lmao we dont care
+            }
+            finally
+            {
+                _reloadQueued = false;
+            }
+        }
+        
         [Init]
         private void Init()
         {
+            var harmony = new Harmony("com.vainstains.ratings");
+            var assembly = Assembly.GetExecutingAssembly();
+            harmony.PatchAll(assembly);
+            
+            m_instance = this;
+            
             SceneManager.sceneLoaded += SceneLoaded;
             LoadedDifficultySelectController.LoadedDifficultyChangedEvent += LoadedDifficultyChanged;
             _ui = new UI(this);
@@ -174,6 +231,7 @@ namespace Ratings
                 AccAiData = PerNote.PredictHitsForMapNotes(diff, _beatSaberSongContainer.Info.BeatsPerMinute, _beatSaberSongContainer.MapDifficultyInfo.NoteJumpSpeed, Config.Timescale);
                 _ui.ApplyNewValues();
                 _initialized = true;
+                OnTimeChanged();
             }
             else
             {
@@ -363,5 +421,13 @@ namespace Ratings
             m_triangleVisualizer.UpdateRatings((float)avgTech, (float)avgPass, (float)accRating, (float)stars);
         }
     }
+    
+    [HarmonyPatch(typeof(BaseDifficulty), nameof(BaseDifficulty.Save))]
+    class SavingPatch
+    {
+        static void Postfix()
+        {
+            Plugin.QueueReload();
+        }
+    }
 }
-
